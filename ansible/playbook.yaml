@@ -1,0 +1,167 @@
+---
+- hosts: all
+  become: true
+  tasks:
+    - name: Update /etc/hosts
+      lineinfile:
+        path: /etc/hosts
+        line: "{{ item }}"
+      with_items:
+        - "10.0.0.1 vm1"
+        - "10.0.0.2 vm2"
+        - "10.0.0.3 vm3"
+        - "10.0.0.4 vm4"
+        - "10.0.0.5 vm5"
+
+- hosts: frontend
+  become: true
+  tasks:
+    - name: Install required packages
+      yum:
+        name:
+          - python3
+          - python3-pip
+          - nginx
+        state: present
+
+    - name: Start Nginx
+      become: yes
+      service:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Install Flask
+      pip:
+        name: flask
+        executable: pip3
+
+    - name: Copy Flask application
+      copy:
+        content: |
+          from flask import Flask
+
+          app = Flask(__name__)
+
+          @app.route('/')
+          def hello_world():
+              return 'Hello, World!'
+
+          if __name__ == '__main__':
+              app.run(host='0.0.0.0')
+        dest: /opt/app.py
+
+    - name: Copy systemd service file
+      copy:
+        content: |
+          [Unit]
+          Description=Flask Application
+
+          [Service]
+          ExecStart=/usr/bin/python3 /opt/app.py
+          WorkingDirectory=/opt
+          Restart=always
+          User=nobody
+
+          [Install]
+          WantedBy=multi-user.target
+        dest: /etc/systemd/system/flask_app.service
+
+    - name: Reload systemd
+      command: systemctl daemon-reload
+
+    - name: Enable and start Flask application service
+      service:
+        name: flask_app
+        state: started
+        enabled: yes
+
+- hosts: database
+  become: true
+  tasks:
+    - name: Install PostgreSQL 12
+      yum:
+        name:
+          - postgresql12-server
+          - postgresql12
+        state: present
+
+    - name: Initialize PostgreSQL database
+      command: /usr/pgsql-12/bin/postgresql-12-setup initdb
+      args:
+        creates: /var/lib/pgsql/12/data/PG_VERSION
+
+    - name: Start PostgreSQL
+      service:
+        name: postgresql-12
+        state: started
+        enabled: yes
+
+    - name: Set up database
+      postgresql_db:
+        name: tododb
+        state: present
+
+    - name: Create database user
+      postgresql_user:
+        name: todouser
+        password: password
+        db: tododb
+        priv: "ALL"
+        state: present
+
+
+- hosts: loadbalancer
+  become: true
+  tasks:
+    - name: Install HAProxy
+      yum:
+        name: haproxy
+        state: present
+
+    - name: Configure HAProxy
+      copy:
+        content: |
+          global
+              log /dev/log    local0
+              log /dev/log    local1 notice
+              chroot /var/lib/haproxy
+              stats socket /run/haproxy/admin.sock mode 660 level admin
+              stats timeout 30s
+              user haproxy
+              group haproxy
+              daemon
+
+          defaults
+              log     global
+              mode    http
+              option  httplog
+              option  dontlognull
+              timeout connect 5000
+              timeout client  50000
+              timeout server  50000
+              errorfile 400 /etc/haproxy/errors/400.http
+              errorfile 403 /etc/haproxy/errors/403.http
+              errorfile 408 /etc/haproxy/errors/408.http
+              errorfile 500 /etc/haproxy/errors/500.http
+              errorfile 502 /etc/haproxy/errors/502.http
+              errorfile 503 /etc/haproxy/errors/503.http
+              errorfile 504 /etc/haproxy/errors/504.http
+
+          frontend http_front
+              bind *:80
+              stats uri /haproxy?stats
+              default_backend http_back
+
+          backend http_back
+              balance roundrobin
+              server vm1 10.0.0.1:5000 check
+              server vm2 10.0.0.2:5000 check
+              server vm3 10.0.0.3:5000 check
+        dest: /etc/haproxy/haproxy.cfg
+
+    - name: Start HAProxy
+      service:
+        name: haproxy
+        state: started
+        enabled: yes
